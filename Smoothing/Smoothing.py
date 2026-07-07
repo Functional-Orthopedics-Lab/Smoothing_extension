@@ -2363,14 +2363,28 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
             binaryArray, spacing
         """
 
+        if segmentationNode is None:
+            raise ValueError("Segmentation node is invalid.")
+
+        if referenceVolumeNode is None:
+            raise ValueError("Reference volume node is invalid.")
+
         labelmapNode = slicer.mrmlScene.AddNewNodeByClass(
             "vtkMRMLLabelMapVolumeNode",
             segmentationNode.GetName() + "_MetricsLabelmap"
         )
 
         try:
-            slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
+            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(
+                referenceVolumeNode
+            )
+
+            segmentIds = vtk.vtkStringArray()
+            segmentationNode.GetSegmentation().GetSegmentIDs(segmentIds)
+
+            slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(
                 segmentationNode,
+                segmentIds,
                 labelmapNode,
                 referenceVolumeNode
             )
@@ -2638,10 +2652,10 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
                 metricsRows.append({
                     "sampleId": sampleId,
                     "runId": runId,
-                    "method": "",
-                    "name": "",
-                    "parameterName": "",
-                    "parameterValue": "",
+                    "method": designRow.get("method", ""),
+                    "name": designRow.get("name", ""),
+                    "parameterName": parameterName,
+                    "parameterValue": parameterValue,
                     "outputPath": outputPath,
                     "status": "failed",
                     "error": str(exc),
@@ -2950,7 +2964,9 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
                         )
 
                         outputFileName = f"{outputName}.seg.nrrd"
-                        outputPath = os.path.join(runOutputFolder, outputFileName)
+                        outputPath = os.path.abspath(
+                            os.path.join(runOutputFolder, outputFileName)
+                        )
 
                         success = slicer.util.saveNode(outputNode, outputPath)
 
