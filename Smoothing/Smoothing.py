@@ -6,6 +6,11 @@ import re
 import qt
 import ctk
 
+import csv
+import itertools
+import random
+import math
+
 import slicer
 from slicer.i18n import tr as _
 from slicer.i18n import translate
@@ -41,11 +46,6 @@ Each selected method is applied independently to a copy of the original segmenta
 This module was developed as a 3D Slicer scripted extension for segmentation postprocessing.
 """)
 
-
-#
-# SmoothingParameterNode
-#
-
 @parameterNodeWrapper
 class SmoothingParameterNode:
     """Parameters for GUI-based segmentation smoothing."""
@@ -72,10 +72,6 @@ class SmoothingParameterNode:
     jointTaubinSmoothingFactor: Annotated[float, WithinRange(0.01, 1.0)] = 0.5
 
     overwriteInput: bool = False
-#
-# SmoothingWidget
-#
-
 
 class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """Module GUI."""
@@ -102,6 +98,8 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
 
         self.setupBatchGui()
+        self.setupExperimentGui()
+        self.setupMetricsGui()
         self.setupProgressGui()
         self.setupGuiDefaults()
         self.setupConnections()
@@ -189,6 +187,244 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.batchOutputFolderLineEdit.connect("textChanged(QString)", self._checkCanApply)
         self.batchRecursiveCheckBox.connect("toggled(bool)", self._checkCanApply)
 
+    def setupExperimentGui(self) -> None:
+        """
+        Add experiment controls.
+
+        Experiment mode reuses the batch input/output folders and runs
+        multiple smoothing parameter configurations over all matched cases.
+        """
+
+        self.experimentCollapsibleButton = ctk.ctkCollapsibleButton()
+        self.experimentCollapsibleButton.text = "Experiment / Design of Experiments"
+        self.experimentCollapsibleButton.collapsed = True
+        self.layout.addWidget(self.experimentCollapsibleButton)
+
+        experimentLayout = qt.QFormLayout(self.experimentCollapsibleButton)
+
+        self.experimentModeCheckBox = qt.QCheckBox()
+        self.experimentModeCheckBox.text = "Enable experiment mode"
+        self.experimentModeCheckBox.checked = False
+        experimentLayout.addRow(self.experimentModeCheckBox)
+
+        self.experimentTypeComboBox = qt.QComboBox()
+        self.experimentTypeComboBox.addItem("Full factorial")
+        self.experimentTypeComboBox.addItem("Monte Carlo")
+        experimentLayout.addRow("Experiment type:", self.experimentTypeComboBox)
+
+        self.monteCarloRunsSpinBox = qt.QSpinBox()
+        self.monteCarloRunsSpinBox.minimum = 1
+        self.monteCarloRunsSpinBox.maximum = 10000
+        self.monteCarloRunsSpinBox.value = 20
+        experimentLayout.addRow("Monte Carlo runs:", self.monteCarloRunsSpinBox)
+
+        self.randomSeedSpinBox = qt.QSpinBox()
+        self.randomSeedSpinBox.minimum = 0
+        self.randomSeedSpinBox.maximum = 999999
+        self.randomSeedSpinBox.value = 42
+        experimentLayout.addRow("Random seed:", self.randomSeedSpinBox)
+
+        self.experimentInfoLabel = qt.QLabel()
+        self.experimentInfoLabel.wordWrap = True
+        self.experimentInfoLabel.text = (
+            "For full factorial, enter comma-separated values. "
+            "For Monte Carlo, enter min,max ranges."
+        )
+        experimentLayout.addRow(self.experimentInfoLabel)
+
+        self.medianExperimentLineEdit = qt.QLineEdit()
+        self.medianExperimentLineEdit.text = "1,2,3,5"
+        experimentLayout.addRow("Median kernel [mm]:", self.medianExperimentLineEdit)
+
+        self.openingExperimentLineEdit = qt.QLineEdit()
+        self.openingExperimentLineEdit.text = "1,2,3,5"
+        experimentLayout.addRow("Opening kernel [mm]:", self.openingExperimentLineEdit)
+
+        self.closingExperimentLineEdit = qt.QLineEdit()
+        self.closingExperimentLineEdit.text = "1,2,3,5"
+        experimentLayout.addRow("Closing kernel [mm]:", self.closingExperimentLineEdit)
+
+        self.gaussianExperimentLineEdit = qt.QLineEdit()
+        self.gaussianExperimentLineEdit.text = "0.5,1.0,1.5,2.0"
+        experimentLayout.addRow("Gaussian sigma [mm]:", self.gaussianExperimentLineEdit)
+
+        self.jointTaubinExperimentLineEdit = qt.QLineEdit()
+        self.jointTaubinExperimentLineEdit.text = "0.2,0.4,0.6,0.8"
+        experimentLayout.addRow("Joint Taubin factor:", self.jointTaubinExperimentLineEdit)
+
+        self.experimentModeCheckBox.connect("toggled(bool)", self.onExperimentModeChanged)
+        self.experimentTypeComboBox.connect("currentIndexChanged(int)", self.onExperimentTypeChanged)
+
+        self.monteCarloRunsSpinBox.connect("valueChanged(int)", self._checkCanApply)
+        self.randomSeedSpinBox.connect("valueChanged(int)", self._checkCanApply)
+
+        self.medianExperimentLineEdit.connect("textChanged(QString)", self._checkCanApply)
+        self.openingExperimentLineEdit.connect("textChanged(QString)", self._checkCanApply)
+        self.closingExperimentLineEdit.connect("textChanged(QString)", self._checkCanApply)
+        self.gaussianExperimentLineEdit.connect("textChanged(QString)", self._checkCanApply)
+        self.jointTaubinExperimentLineEdit.connect("textChanged(QString)", self._checkCanApply)
+
+        self.onExperimentTypeChanged()
+        self.onExperimentModeChanged()
+
+    def isMetricsModeEnabled(self) -> bool:
+        return (
+            hasattr(self, "metricsModeCheckBox")
+            and self.metricsModeCheckBox.checked
+        )
+
+
+    def onMetricsModeChanged(self, checked=False) -> None:
+        """
+        Metrics mode is independent from smoothing and experiment execution.
+
+        When enabled, normal batch/experiment inputs are not required.
+        """
+
+        metricsMode = self.isMetricsModeEnabled()
+
+        if metricsMode:
+            self.batchModeCheckBox.checked = False
+            self.experimentModeCheckBox.checked = False
+
+        self._checkCanApply()
+
+
+    def onBrowseMetricsDataFolder(self, checked=False) -> None:
+        folderPath = qt.QFileDialog.getExistingDirectory(
+            slicer.util.mainWindow(),
+            "Select original data folder",
+            self.metricsDataFolderLineEdit.text,
+        )
+
+        if folderPath:
+            self.metricsDataFolderLineEdit.text = folderPath
+            self._checkCanApply()
+
+
+    def onBrowseMetricsOutputFolder(self, checked=False) -> None:
+        folderPath = qt.QFileDialog.getExistingDirectory(
+            slicer.util.mainWindow(),
+            "Select experiment output folder",
+            self.metricsOutputFolderLineEdit.text,
+        )
+
+        if folderPath:
+            self.metricsOutputFolderLineEdit.text = folderPath
+            self._checkCanApply()
+
+
+    def getSelectedMetrics(self):
+        selectedMetrics = []
+
+        if self.metricsVolumeCheckBox.checked:
+            selectedMetrics.append("volume")
+
+        if self.metricsDiceCheckBox.checked:
+            selectedMetrics.append("dice")
+
+        if self.metricsSurfaceAreaCheckBox.checked:
+            selectedMetrics.append("surface_area")
+
+        if self.metricsSegmentCountCheckBox.checked:
+            selectedMetrics.append("segment_count")
+
+        return selectedMetrics
+    def setupMetricsGui(self) -> None:
+        """
+        Add controls for post-experiment metrics analysis.
+
+        Metrics mode reads:
+            - original data folder
+            - experiment output folder
+            - experiment_design.csv
+            - experiment_summary.csv
+
+        Then it computes selected metrics and saves:
+            - experiment_metrics.csv
+            - plots/*.png
+        """
+
+        self.metricsCollapsibleButton = ctk.ctkCollapsibleButton()
+        self.metricsCollapsibleButton.text = "Metrics analysis"
+        self.metricsCollapsibleButton.collapsed = True
+        self.layout.addWidget(self.metricsCollapsibleButton)
+
+        metricsLayout = qt.QFormLayout(self.metricsCollapsibleButton)
+
+        self.metricsModeCheckBox = qt.QCheckBox()
+        self.metricsModeCheckBox.text = "Enable metrics mode"
+        self.metricsModeCheckBox.checked = False
+        metricsLayout.addRow(self.metricsModeCheckBox)
+
+        self.metricsDataFolderLineEdit = qt.QLineEdit()
+        self.metricsDataFolderLineEdit.placeholderText = (
+            "Folder containing original Volume_XXX and Segmentation_XXX files"
+        )
+
+        self.metricsDataFolderButton = qt.QPushButton("Browse...")
+        dataFolderLayout = qt.QHBoxLayout()
+        dataFolderLayout.addWidget(self.metricsDataFolderLineEdit)
+        dataFolderLayout.addWidget(self.metricsDataFolderButton)
+        metricsLayout.addRow("Original data folder:", dataFolderLayout)
+
+        self.metricsOutputFolderLineEdit = qt.QLineEdit()
+        self.metricsOutputFolderLineEdit.placeholderText = (
+            "Experiment output folder containing experiment_design.csv and experiment_summary.csv"
+        )
+
+        self.metricsOutputFolderButton = qt.QPushButton("Browse...")
+        outputFolderLayout = qt.QHBoxLayout()
+        outputFolderLayout.addWidget(self.metricsOutputFolderLineEdit)
+        outputFolderLayout.addWidget(self.metricsOutputFolderButton)
+        metricsLayout.addRow("Experiment output folder:", outputFolderLayout)
+
+        self.metricsVolumeCheckBox = qt.QCheckBox()
+        self.metricsVolumeCheckBox.text = "Volume change"
+        self.metricsVolumeCheckBox.checked = True
+        metricsLayout.addRow(self.metricsVolumeCheckBox)
+
+        self.metricsDiceCheckBox = qt.QCheckBox()
+        self.metricsDiceCheckBox.text = "Dice against original"
+        self.metricsDiceCheckBox.checked = True
+        metricsLayout.addRow(self.metricsDiceCheckBox)
+
+        self.metricsSurfaceAreaCheckBox = qt.QCheckBox()
+        self.metricsSurfaceAreaCheckBox.text = "Surface area change"
+        self.metricsSurfaceAreaCheckBox.checked = True
+        metricsLayout.addRow(self.metricsSurfaceAreaCheckBox)
+
+        self.metricsSegmentCountCheckBox = qt.QCheckBox()
+        self.metricsSegmentCountCheckBox.text = "Segment count validation"
+        self.metricsSegmentCountCheckBox.checked = True
+        metricsLayout.addRow(self.metricsSegmentCountCheckBox)
+
+        self.metricsGeneratePlotsCheckBox = qt.QCheckBox()
+        self.metricsGeneratePlotsCheckBox.text = "Generate plots"
+        self.metricsGeneratePlotsCheckBox.checked = True
+        metricsLayout.addRow(self.metricsGeneratePlotsCheckBox)
+
+        self.metricsRecursiveCheckBox = qt.QCheckBox()
+        self.metricsRecursiveCheckBox.text = "Search original data folder recursively"
+        self.metricsRecursiveCheckBox.checked = True
+        metricsLayout.addRow(self.metricsRecursiveCheckBox)
+
+        self.metricsModeCheckBox.connect("toggled(bool)", self.onMetricsModeChanged)
+
+        self.metricsDataFolderButton.connect("clicked(bool)", self.onBrowseMetricsDataFolder)
+        self.metricsOutputFolderButton.connect("clicked(bool)", self.onBrowseMetricsOutputFolder)
+
+        self.metricsDataFolderLineEdit.connect("textChanged(QString)", self._checkCanApply)
+        self.metricsOutputFolderLineEdit.connect("textChanged(QString)", self._checkCanApply)
+
+        self.metricsVolumeCheckBox.connect("toggled(bool)", self._checkCanApply)
+        self.metricsDiceCheckBox.connect("toggled(bool)", self._checkCanApply)
+        self.metricsSurfaceAreaCheckBox.connect("toggled(bool)", self._checkCanApply)
+        self.metricsSegmentCountCheckBox.connect("toggled(bool)", self._checkCanApply)
+        self.metricsGeneratePlotsCheckBox.connect("toggled(bool)", self._checkCanApply)
+
+        
+
     def resetProgressBars(self) -> None:
         """Reset progress bars."""
 
@@ -264,6 +500,87 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def isBatchModeEnabled(self) -> bool:
         return hasattr(self, "batchModeCheckBox") and self.batchModeCheckBox.checked
         
+    def isExperimentModeEnabled(self) -> bool:
+        return (
+            hasattr(self, "experimentModeCheckBox")
+            and self.experimentModeCheckBox.checked
+        )
+
+    def onExperimentModeChanged(self, checked=False) -> None:
+        """
+        Experiment mode requires batch mode because it processes an input folder
+        and writes many outputs to an output folder.
+        """
+
+        experimentMode = self.isExperimentModeEnabled()
+
+        if experimentMode:
+            self.batchModeCheckBox.checked = True
+
+        self.onExperimentTypeChanged()
+        self._checkCanApply()
+
+
+    def onExperimentTypeChanged(self, *args) -> None:
+        if not hasattr(self, "experimentTypeComboBox"):
+            return
+
+        isMonteCarlo = self.experimentTypeComboBox.currentText == "Monte Carlo"
+
+        self.monteCarloRunsSpinBox.enabled = isMonteCarlo
+        self.randomSeedSpinBox.enabled = isMonteCarlo
+
+        if isMonteCarlo:
+            self.experimentInfoLabel.text = (
+                "Monte Carlo mode: enter min,max ranges for each parameter."
+            )
+
+            self.medianExperimentLineEdit.text = "1,5"
+            self.openingExperimentLineEdit.text = "1,5"
+            self.closingExperimentLineEdit.text = "1,5"
+            self.gaussianExperimentLineEdit.text = "0.5,2.0"
+            self.jointTaubinExperimentLineEdit.text = "0.2,0.8"
+
+        else:
+            self.experimentInfoLabel.text = (
+                "Full factorial mode: enter comma-separated parameter values."
+            )
+
+            self.medianExperimentLineEdit.text = "1,2,3,5"
+            self.openingExperimentLineEdit.text = "1,2,3,5"
+            self.closingExperimentLineEdit.text = "1,2,3,5"
+            self.gaussianExperimentLineEdit.text = "0.5,1.0,1.5,2.0"
+            self.jointTaubinExperimentLineEdit.text = "0.2,0.4,0.6,0.8"
+
+        self._checkCanApply()
+
+
+    def parseFloatList(self, text):
+        values = [
+            float(value.strip())
+            for value in text.split(",")
+            if value.strip()
+        ]
+
+        if len(values) == 0:
+            raise ValueError("At least one numeric value is required.")
+
+        return values
+
+
+    def parseFloatRange(self, text):
+        values = self.parseFloatList(text)
+
+        if len(values) != 2:
+            raise ValueError("Range must contain exactly two values: min,max")
+
+        if values[0] >= values[1]:
+            raise ValueError("Range minimum must be smaller than range maximum.")
+
+        return {
+            "min": values[0],
+            "max": values[1],
+        }
     def cleanup(self) -> None:
         self.removeObservers()
 
@@ -437,17 +754,6 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.ui.outputSegmentationSelector.visible = showOutputSelector
 
-    def anySmoothingMethodSelected(self) -> bool:
-        """Return True if at least one smoothing method is selected."""
-
-        return (
-            self.ui.medianCheckBox.checked
-            or self.ui.openingCheckBox.checked
-            or self.ui.closingCheckBox.checked
-            or self.ui.gaussianCheckBox.checked
-            or self.ui.jointTaubinCheckBox.checked
-        )
-
     def getSelectedSmoothingSteps(self):
         """
         Build the smoothing pipeline from selected checkboxes.
@@ -518,6 +824,42 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         smoothingSteps = self.getSelectedSmoothingSteps()
         hasMethod = len(smoothingSteps) > 0
 
+        if self.isMetricsModeEnabled():
+            dataFolder = self.metricsDataFolderLineEdit.text.strip()
+            outputFolder = self.metricsOutputFolderLineEdit.text.strip()
+
+            designCsvPath = os.path.join(outputFolder, "experiment_design.csv")
+            summaryCsvPath = os.path.join(outputFolder, "experiment_summary.csv")
+
+            hasMetric = len(self.getSelectedMetrics()) > 0
+
+            canApply = (
+                os.path.isdir(dataFolder)
+                and os.path.isdir(outputFolder)
+                and os.path.exists(designCsvPath)
+                and os.path.exists(summaryCsvPath)
+                and hasMetric
+            )
+
+            self.ui.applyButton.enabled = canApply
+
+            if canApply:
+                self.ui.applyButton.toolTip = _(
+                    "Analyze experiment outputs and compute selected metrics."
+                )
+                if hasattr(self.ui, "statusLabel"):
+                    self.ui.statusLabel.text = "Ready to analyze experiment metrics."
+            else:
+                self.ui.applyButton.toolTip = _(
+                    "Select valid data/output folders and at least one metric."
+                )
+                if hasattr(self.ui, "statusLabel"):
+                    self.ui.statusLabel.text = (
+                        "Select original data folder, experiment output folder, and metrics."
+                    )
+
+            return
+
         if self.isBatchModeEnabled():
             inputFolder = self.batchInputFolderLineEdit.text.strip()
             outputFolder = self.batchOutputFolderLineEdit.text.strip()
@@ -528,22 +870,47 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 and len(outputFolder) > 0
             )
 
+            if canApply and self.isExperimentModeEnabled():
+                try:
+                    if self.experimentTypeComboBox.currentText == "Full factorial":
+                        self.getFullFactorialExperimentDefinitionFromGui()
+                    else:
+                        self.getMonteCarloExperimentDefinitionFromGui()
+                except Exception:
+                    canApply = False
+
             self.ui.applyButton.enabled = canApply
 
             if canApply:
-                self.ui.applyButton.toolTip = _(
-                    "Batch process all matched volume/segmentation pairs in the selected folder."
-                )
-                if hasattr(self.ui, "statusLabel"):
-                    self.ui.statusLabel.text = "Ready to batch process segmentations."
-            else:
-                self.ui.applyButton.toolTip = _(
-                    "Select a valid input folder, output folder, and at least one smoothing method."
-                )
-                if hasattr(self.ui, "statusLabel"):
-                    self.ui.statusLabel.text = (
-                        "Select batch input folder, output folder, and smoothing methods."
+                if self.isExperimentModeEnabled():
+                    self.ui.applyButton.toolTip = _(
+                        "Run smoothing experiment over all matched volume/segmentation pairs."
                     )
+                    if hasattr(self.ui, "statusLabel"):
+                        self.ui.statusLabel.text = "Ready to run smoothing experiment."
+                else:
+                    self.ui.applyButton.toolTip = _(
+                        "Batch process all matched volume/segmentation pairs in the selected folder."
+                    )
+                    if hasattr(self.ui, "statusLabel"):
+                        self.ui.statusLabel.text = "Ready to batch process segmentations."
+            else:
+                if self.isExperimentModeEnabled():
+                    self.ui.applyButton.toolTip = _(
+                        "Select valid batch folders, smoothing methods, and experiment values."
+                    )
+                    if hasattr(self.ui, "statusLabel"):
+                        self.ui.statusLabel.text = (
+                            "Select folders, smoothing methods, and valid experiment values."
+                        )
+                else:
+                    self.ui.applyButton.toolTip = _(
+                        "Select a valid input folder, output folder, and at least one smoothing method."
+                    )
+                    if hasattr(self.ui, "statusLabel"):
+                        self.ui.statusLabel.text = (
+                            "Select batch input folder, output folder, and smoothing methods."
+                        )
 
             return
 
@@ -591,7 +958,118 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     self.ui.statusLabel.text = (
                         "Select the required inputs and smoothing methods."
                     )
-                    
+    def getFullFactorialExperimentDefinitionFromGui(self):
+        """
+        Build a full factorial experiment definition from the GUI.
+
+        Only checked smoothing methods are included.
+        """
+
+        methods = {}
+
+        if self.ui.medianCheckBox.checked:
+            methods["MEDIAN"] = {
+                "name": "Median",
+                "kernelSizeMm": self.parseFloatList(
+                    self.medianExperimentLineEdit.text
+                ),
+            }
+
+        if self.ui.openingCheckBox.checked:
+            methods["MORPHOLOGICAL_OPENING"] = {
+                "name": "Opening",
+                "kernelSizeMm": self.parseFloatList(
+                    self.openingExperimentLineEdit.text
+                ),
+            }
+
+        if self.ui.closingCheckBox.checked:
+            methods["MORPHOLOGICAL_CLOSING"] = {
+                "name": "Closing",
+                "kernelSizeMm": self.parseFloatList(
+                    self.closingExperimentLineEdit.text
+                ),
+            }
+
+        if self.ui.gaussianCheckBox.checked:
+            methods["GAUSSIAN"] = {
+                "name": "Gaussian",
+                "gaussianStandardDeviationMm": self.parseFloatList(
+                    self.gaussianExperimentLineEdit.text
+                ),
+            }
+
+        if self.ui.jointTaubinCheckBox.checked:
+            methods["JOINT_TAUBIN"] = {
+                "name": "Joint Taubin",
+                "jointTaubinSmoothingFactor": self.parseFloatList(
+                    self.jointTaubinExperimentLineEdit.text
+                ),
+            }
+
+        if not methods:
+            raise ValueError("At least one smoothing method must be selected.")
+
+        return {
+            "methods": methods
+        }
+
+
+    def getMonteCarloExperimentDefinitionFromGui(self):
+        """
+        Build a Monte Carlo experiment definition from the GUI.
+
+        Only checked smoothing methods are included.
+        """
+
+        methods = {}
+
+        if self.ui.medianCheckBox.checked:
+            methods["MEDIAN"] = {
+                "name": "Median",
+                "kernelSizeMm": self.parseFloatRange(
+                    self.medianExperimentLineEdit.text
+                ),
+            }
+
+        if self.ui.openingCheckBox.checked:
+            methods["MORPHOLOGICAL_OPENING"] = {
+                "name": "Opening",
+                "kernelSizeMm": self.parseFloatRange(
+                    self.openingExperimentLineEdit.text
+                ),
+            }
+
+        if self.ui.closingCheckBox.checked:
+            methods["MORPHOLOGICAL_CLOSING"] = {
+                "name": "Closing",
+                "kernelSizeMm": self.parseFloatRange(
+                    self.closingExperimentLineEdit.text
+                ),
+            }
+
+        if self.ui.gaussianCheckBox.checked:
+            methods["GAUSSIAN"] = {
+                "name": "Gaussian",
+                "gaussianStandardDeviationMm": self.parseFloatRange(
+                    self.gaussianExperimentLineEdit.text
+                ),
+            }
+
+        if self.ui.jointTaubinCheckBox.checked:
+            methods["JOINT_TAUBIN"] = {
+                "name": "Joint Taubin",
+                "jointTaubinSmoothingFactor": self.parseFloatRange(
+                    self.jointTaubinExperimentLineEdit.text
+                ),
+            }
+
+        if not methods:
+            raise ValueError("At least one smoothing method must be selected.")
+
+        return {
+            "methods": methods
+        }       
     def onApplyButton(self) -> None:
         """
         Run smoothing when the user clicks Apply.
@@ -611,6 +1089,47 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.resetProgressBars()
 
             scope = self.currentComboData(self.ui.scopeComboBox)
+
+            # ------------------------------------------------------------
+            # Metrics mode
+            # ------------------------------------------------------------
+            if self.isMetricsModeEnabled():
+                dataFolder = self.metricsDataFolderLineEdit.text.strip()
+                outputFolder = self.metricsOutputFolderLineEdit.text.strip()
+                recursive = self.metricsRecursiveCheckBox.checked
+                selectedMetrics = self.getSelectedMetrics()
+                generatePlots = self.metricsGeneratePlotsCheckBox.checked
+
+                if not os.path.isdir(dataFolder):
+                    raise ValueError(f"Original data folder does not exist: {dataFolder}")
+
+                if not os.path.isdir(outputFolder):
+                    raise ValueError(f"Experiment output folder does not exist: {outputFolder}")
+
+                if not selectedMetrics:
+                    raise ValueError("At least one metric must be selected.")
+
+                self.updateBatchProgress(0, "Metrics analysis started...")
+
+                summary = self.logic.analyzeExperimentMetrics(
+                    dataFolder=dataFolder,
+                    experimentOutputFolder=outputFolder,
+                    selectedMetrics=selectedMetrics,
+                    recursive=recursive,
+                    generatePlots=generatePlots,
+                    progressCallback=self.updateBatchProgress,
+                )
+
+                slicer.util.infoDisplay(
+                    f"Metrics analysis completed.\n\n"
+                    f"Processed rows: {summary['processed_rows']}\n"
+                    f"Failed rows: {summary['failed_rows']}\n\n"
+                    f"Metrics CSV:\n{summary['metrics_csv']}\n\n"
+                    f"Plots folder:\n{summary['plots_folder']}"
+                )
+
+                return
+
             smoothingSteps = self.getSelectedSmoothingSteps()
 
             if not smoothingSteps:
@@ -631,6 +1150,57 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 if not outputFolder:
                     raise ValueError("Batch output folder is empty.")
 
+                # ------------------------------------------------------------
+                # Experiment mode
+                # ------------------------------------------------------------
+                if self.isExperimentModeEnabled():
+                    experimentType = self.experimentTypeComboBox.currentText
+
+                    if experimentType == "Full factorial":
+                        experimentDefinition = self.getFullFactorialExperimentDefinitionFromGui()
+                        experimentRuns = self.logic.generateFullFactorialExperimentRuns(
+                            experimentDefinition
+                        )
+
+                    elif experimentType == "Monte Carlo":
+                        experimentDefinition = self.getMonteCarloExperimentDefinitionFromGui()
+                        experimentRuns = self.logic.generateMonteCarloExperimentRuns(
+                            experimentDefinition=experimentDefinition,
+                            numberOfRuns=self.monteCarloRunsSpinBox.value,
+                            randomSeed=self.randomSeedSpinBox.value,
+                        )
+
+                    else:
+                        raise ValueError(f"Unsupported experiment type: {experimentType}")
+
+                    self.updateBatchProgress(0, "Smoothing experiment started...")
+
+                    summary = self.logic.runSmoothingExperiment(
+                        inputFolder=inputFolder,
+                        outputFolder=outputFolder,
+                        experimentRuns=experimentRuns,
+                        scope=scope,
+                        recursive=recursive,
+                        keepLoadedNodes=keepLoadedNodes,
+                        progressCallback=self.updateBatchProgress,
+                    )
+
+                    slicer.util.infoDisplay(
+                        f"Smoothing experiment completed.\n\n"
+                        f"Found pairs: {summary['found_pairs']}\n"
+                        f"Experiment runs: {summary['experiment_runs']}\n"
+                        f"Successful outputs: {summary['successful_outputs']}\n"
+                        f"Failed outputs: {summary['failed_outputs']}\n\n"
+                        f"Design CSV:\n{summary['design_csv']}\n\n"
+                        f"Summary CSV:\n{summary['summary_csv']}\n\n"
+                        f"Output folder:\n{outputFolder}"
+                    )
+
+                    return
+
+                # ------------------------------------------------------------
+                # Regular batch mode
+                # ------------------------------------------------------------
                 self.updateBatchProgress(0, "Batch smoothing started...")
 
                 summary = self.logic.batchSmoothSegmentations(
@@ -719,15 +1289,9 @@ class SmoothingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     scope=scope,
                     baseOutputSegmentationNode=self.ui.outputSegmentationSelector.currentNode(),
                 )
-
             slicer.util.infoDisplay(
                 f"Smoothing completed. Created {len(outputNodes)} output segmentation(s)."
             )
-
-#
-# SmoothingLogic
-#
-
 
 class SmoothingLogic(ScriptedLoadableModuleLogic):
     """Computation logic for segmentation smoothing."""
@@ -810,7 +1374,149 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
         )
 
         return segmentationNode
+
+    def readCsvRows(self, csvPath):
+        if not os.path.exists(csvPath):
+            raise ValueError(f"CSV file does not exist: {csvPath}")
+
+        with open(csvPath, newline="") as csvFile:
+            return list(csv.DictReader(csvFile))
+        
+    def generateFullFactorialExperimentRuns(self, experimentDefinition):
+        """
+        Generate full factorial smoothing experiment runs.
+
+        Each method is treated independently. For each selected method, all
+        combinations of its parameter values are generated.
+        """
+
+        runs = []
+        runIndex = 1
+
+        for method, methodConfig in experimentDefinition["methods"].items():
+            methodName = methodConfig.get("name", method)
+
+            parameterGrid = {
+                key: value
+                for key, value in methodConfig.items()
+                if key != "name"
+            }
+
+            if not parameterGrid:
+                raise ValueError(f"No parameters defined for method: {method}")
+
+            parameterNames = list(parameterGrid.keys())
+            parameterValues = [parameterGrid[name] for name in parameterNames]
+
+            for values in parameterValues:
+                if not isinstance(values, list):
+                    raise ValueError(
+                        f"Full factorial parameter values must be lists. "
+                        f"Invalid parameter in method {method}."
+                    )
+
+                if len(values) == 0:
+                    raise ValueError(
+                        f"Empty parameter list in method {method}."
+                    )
+
+            for combination in itertools.product(*parameterValues):
+                run = {
+                    "runId": f"run_{runIndex:04d}",
+                    "method": method,
+                    "name": methodName,
+                }
+
+                for parameterName, parameterValue in zip(parameterNames, combination):
+                    run[parameterName] = parameterValue
+
+                runs.append(run)
+                runIndex += 1
+
+        return runs
+    def generateMonteCarloExperimentRuns(
+        self,
+        experimentDefinition,
+        numberOfRuns=20,
+        randomSeed=42,
+    ):
+        """
+        Generate Monte Carlo smoothing experiment runs.
+
+        experimentDefinition example:
+            {
+                "methods": {
+                    "MEDIAN": {
+                        "name": "Median",
+                        "kernelSizeMm": {"min": 1.0, "max": 7.0}
+                    },
+                    "GAUSSIAN": {
+                        "name": "Gaussian",
+                        "gaussianStandardDeviationMm": {"min": 0.2, "max": 3.0}
+                    },
+                    "JOINT_TAUBIN": {
+                        "name": "Joint Taubin",
+                        "jointTaubinSmoothingFactor": {"min": 0.1, "max": 1.0}
+                    }
+                }
+            }
+        """
+
+        rng = random.Random(randomSeed)
+        runs = []
+
+        methodItems = list(experimentDefinition["methods"].items())
+
+        for runIndex in range(1, numberOfRuns + 1):
+            method, methodConfig = rng.choice(methodItems)
+            methodName = methodConfig.get("name", method)
+
+            run = {
+                "runId": f"run_{runIndex:04d}",
+                "method": method,
+                "name": methodName,
+            }
+
+            for parameterName, parameterRange in methodConfig.items():
+                if parameterName == "name":
+                    continue
+
+                minValue = float(parameterRange["min"])
+                maxValue = float(parameterRange["max"])
+
+                run[parameterName] = rng.uniform(minValue, maxValue)
+
+            runs.append(run)
+
+        return runs
     
+    def saveExperimentDesignCsv(self, experimentRuns, outputFolder):
+        """Save experiment design table as CSV."""
+
+        os.makedirs(outputFolder, exist_ok=True)
+
+        outputPath = os.path.join(outputFolder, "experiment_design.csv")
+
+        fieldNames = [
+            "runId",
+            "method",
+            "name",
+            "kernelSizeMm",
+            "gaussianStandardDeviationMm",
+            "jointTaubinSmoothingFactor",
+        ]
+
+        with open(outputPath, "w", newline="") as csvFile:
+            writer = csv.DictWriter(csvFile, fieldnames=fieldNames)
+            writer.writeheader()
+
+            for run in experimentRuns:
+                writer.writerow({
+                    fieldName: run.get(fieldName, "")
+                    for fieldName in fieldNames
+                })
+
+        return outputPath
     def getParameterNode(self):
         return SmoothingParameterNode(super().getParameterNode())
 
@@ -875,45 +1581,6 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
             inputSegmentationNode=inputSegmentationNode,
             outputSegmentationNode=outputSegmentationNode,
             outputName=inputSegmentationNode.GetName() + "_smoothed",
-        )
-
-    def smoothSegmentationPipeline(
-        self,
-        segmentationNode,
-        referenceVolumeNode,
-        steps,
-        scope="VISIBLE_SEGMENTS",
-    ) -> None:
-        """Apply multiple smoothing steps sequentially."""
-
-        if not steps:
-            raise ValueError("No smoothing steps were selected.")
-
-        startTime = time.time()
-        logging.info("Segmentation smoothing pipeline started")
-
-        for stepIndex, step in enumerate(steps, start=1):
-            logging.info(
-                f"Applying smoothing step {stepIndex}/{len(steps)}: {step.get('name', step.get('method'))}"
-            )
-
-            self.smoothSegmentation(
-                segmentationNode=segmentationNode,
-                referenceVolumeNode=referenceVolumeNode,
-                method=step["method"],
-                scope=scope,
-                kernelSizeMm=step.get("kernelSizeMm", 3.0),
-                gaussianStandardDeviationMm=step.get(
-                    "gaussianStandardDeviationMm", 1.0
-                ),
-                jointTaubinSmoothingFactor=step.get(
-                    "jointTaubinSmoothingFactor", 0.5
-                ),
-            )
-
-        stopTime = time.time()
-        logging.info(
-            f"Segmentation smoothing pipeline completed in {stopTime - startTime:.2f} seconds"
         )
 
     def smoothSegmentation(
@@ -1658,15 +2325,767 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
             "saved_outputs": savedOutputs,
             "failed_pairs": failedPairs,
         }
+    def readExperimentDesignByRunId(self, experimentOutputFolder):
+        designCsvPath = os.path.join(experimentOutputFolder, "experiment_design.csv")
+        designRows = self.readCsvRows(designCsvPath)
 
+        designByRunId = {}
 
-#
-# SmoothingTest
-#
-#
-# SmoothingTest
-#
+        for row in designRows:
+            runId = row.get("runId", "").strip()
+            if runId:
+                designByRunId[runId] = row
 
+        return designByRunId
+    
+    def activeParameterFromDesignRow(self, designRow):
+        parameterColumns = [
+            "kernelSizeMm",
+            "gaussianStandardDeviationMm",
+            "jointTaubinSmoothingFactor",
+        ]
+
+        for column in parameterColumns:
+            value = designRow.get(column, "").strip()
+            if value != "":
+                try:
+                    return column, float(value)
+                except ValueError:
+                    return column, value
+
+        return "", ""
+    
+    def segmentationToBinaryArray(self, segmentationNode, referenceVolumeNode):
+        """
+        Export all segments to one merged binary labelmap array.
+
+        Returns:
+            binaryArray, spacing
+        """
+
+        labelmapNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLLabelMapVolumeNode",
+            segmentationNode.GetName() + "_MetricsLabelmap"
+        )
+
+        try:
+            slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
+                segmentationNode,
+                labelmapNode,
+                referenceVolumeNode
+            )
+
+            array = slicer.util.arrayFromVolume(labelmapNode)
+            binaryArray = array > 0
+            spacing = referenceVolumeNode.GetSpacing()
+
+            return binaryArray, spacing
+
+        finally:
+            if slicer.mrmlScene.IsNodePresent(labelmapNode):
+                slicer.mrmlScene.RemoveNode(labelmapNode)
+
+    def computeBinaryVolumeMm3(self, binaryArray, spacing):
+            voxelVolumeMm3 = spacing[0] * spacing[1] * spacing[2]
+            return float(binaryArray.sum()) * voxelVolumeMm3
+    
+    def computeDice(self, originalArray, outputArray):
+        originalCount = int(originalArray.sum())
+        outputCount = int(outputArray.sum())
+
+        if originalCount == 0 and outputCount == 0:
+            return 1.0
+
+        if originalCount == 0 or outputCount == 0:
+            return 0.0
+
+        intersection = int((originalArray & outputArray).sum())
+
+        return float(2.0 * intersection / (originalCount + outputCount))
+    
+    def computeSurfaceAreaMm2(self, segmentationNode):
+        """
+        Compute total closed-surface area across all segments.
+        """
+
+        segmentationNode.GetSegmentation().CreateRepresentation(
+            slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()
+        )
+
+        segmentation = segmentationNode.GetSegmentation()
+
+        segmentIds = vtk.vtkStringArray()
+        segmentation.GetSegmentIDs(segmentIds)
+
+        totalArea = 0.0
+
+        massProperties = vtk.vtkMassProperties()
+
+        for i in range(segmentIds.GetNumberOfValues()):
+            segmentId = segmentIds.GetValue(i)
+
+            polyData = segmentation.GetSegment(segmentId).GetRepresentation(
+                slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()
+            )
+
+            if polyData is None:
+                continue
+
+            if polyData.GetNumberOfPoints() == 0:
+                continue
+
+            triangleFilter = vtk.vtkTriangleFilter()
+            triangleFilter.SetInputData(polyData)
+            triangleFilter.Update()
+
+            massProperties.SetInputData(triangleFilter.GetOutput())
+            totalArea += massProperties.GetSurfaceArea()
+
+        return float(totalArea)
+    def getSegmentCount(self, segmentationNode):
+        return segmentationNode.GetSegmentation().GetNumberOfSegments()
+    
+    def computeMetricsForSegmentationPair(
+        self,
+        originalSegmentationNode,
+        outputSegmentationNode,
+        referenceVolumeNode,
+        selectedMetrics,
+    ):
+        metrics = {}
+
+        originalSegmentCount = self.getSegmentCount(originalSegmentationNode)
+        outputSegmentCount = self.getSegmentCount(outputSegmentationNode)
+
+        metrics["originalSegmentCount"] = originalSegmentCount
+        metrics["outputSegmentCount"] = outputSegmentCount
+        metrics["segmentCountDifference"] = outputSegmentCount - originalSegmentCount
+        metrics["segmentCountPreserved"] = int(originalSegmentCount == outputSegmentCount)
+
+        needArrays = (
+            "volume" in selectedMetrics
+            or "dice" in selectedMetrics
+        )
+
+        if needArrays:
+            originalArray, spacing = self.segmentationToBinaryArray(
+                originalSegmentationNode,
+                referenceVolumeNode
+            )
+
+            outputArray, _ = self.segmentationToBinaryArray(
+                outputSegmentationNode,
+                referenceVolumeNode
+            )
+
+        if "volume" in selectedMetrics:
+            originalVolume = self.computeBinaryVolumeMm3(originalArray, spacing)
+            outputVolume = self.computeBinaryVolumeMm3(outputArray, spacing)
+
+            if originalVolume > 0:
+                volumeChangePercent = 100.0 * (outputVolume - originalVolume) / originalVolume
+            else:
+                volumeChangePercent = ""
+
+            metrics["originalVolumeMm3"] = originalVolume
+            metrics["outputVolumeMm3"] = outputVolume
+            metrics["volumeChangePercent"] = volumeChangePercent
+
+        if "dice" in selectedMetrics:
+            metrics["diceAgainstOriginal"] = self.computeDice(
+                originalArray,
+                outputArray
+            )
+
+        if "surface_area" in selectedMetrics:
+            originalArea = self.computeSurfaceAreaMm2(originalSegmentationNode)
+            outputArea = self.computeSurfaceAreaMm2(outputSegmentationNode)
+
+            if originalArea > 0:
+                surfaceAreaChangePercent = 100.0 * (outputArea - originalArea) / originalArea
+            else:
+                surfaceAreaChangePercent = ""
+
+            metrics["originalSurfaceAreaMm2"] = originalArea
+            metrics["outputSurfaceAreaMm2"] = outputArea
+            metrics["surfaceAreaChangePercent"] = surfaceAreaChangePercent
+
+        return metrics
+    
+    def analyzeExperimentMetrics(
+        self,
+        dataFolder,
+        experimentOutputFolder,
+        selectedMetrics,
+        recursive=True,
+        generatePlots=True,
+        progressCallback=None,
+    ):
+        """
+        Analyze saved experiment outputs.
+
+        Reads:
+            - experiment_design.csv
+            - experiment_summary.csv
+
+        Computes selected metrics comparing each experiment output against
+        the corresponding original segmentation.
+        """
+
+        if not os.path.isdir(dataFolder):
+            raise ValueError(f"Original data folder does not exist: {dataFolder}")
+
+        if not os.path.isdir(experimentOutputFolder):
+            raise ValueError(f"Experiment output folder does not exist: {experimentOutputFolder}")
+
+        if not selectedMetrics:
+            raise ValueError("No metrics selected.")
+
+        designByRunId = self.readExperimentDesignByRunId(experimentOutputFolder)
+
+        summaryCsvPath = os.path.join(experimentOutputFolder, "experiment_summary.csv")
+        summaryRows = self.readCsvRows(summaryCsvPath)
+
+        successfulRows = [
+            row for row in summaryRows
+            if row.get("status", "") == "success"
+            and row.get("outputPath", "").strip() != ""
+        ]
+
+        pairs = self.findVolumeSegmentationPairs(
+            folderPath=dataFolder,
+            recursive=recursive,
+        )
+
+        pairBySampleId = {
+            pair["sampleId"]: pair
+            for pair in pairs
+        }
+
+        metricsRows = []
+
+        totalRows = len(successfulRows)
+        failedRows = 0
+
+        if progressCallback:
+            progressCallback(0, f"Metrics analysis started. Rows: {totalRows}")
+
+        for rowIndex, summaryRow in enumerate(successfulRows, start=1):
+            sampleId = summaryRow.get("sampleId", "").strip()
+            runId = summaryRow.get("runId", "").strip()
+            outputPath = summaryRow.get("outputPath", "").strip()
+
+            loadedNodes = []
+
+            try:
+                if sampleId not in pairBySampleId:
+                    raise RuntimeError(f"No original data pair found for sample: {sampleId}")
+
+                if runId not in designByRunId:
+                    raise RuntimeError(f"No design row found for runId: {runId}")
+
+                if not os.path.exists(outputPath):
+                    raise RuntimeError(f"Output segmentation file does not exist: {outputPath}")
+
+                pair = pairBySampleId[sampleId]
+                designRow = designByRunId[runId]
+
+                parameterName, parameterValue = self.activeParameterFromDesignRow(designRow)
+
+                referenceVolumeNode = slicer.util.loadVolume(pair["volumePath"])
+                if referenceVolumeNode is None:
+                    raise RuntimeError(f"Failed to load volume: {pair['volumePath']}")
+
+                loadedNodes.append(referenceVolumeNode)
+
+                originalSegmentationNode = self.loadSegmentationNodeRobust(
+                    segmentationPath=pair["segmentationPath"],
+                    referenceVolumeNode=referenceVolumeNode,
+                )
+                loadedNodes.append(originalSegmentationNode)
+
+                outputSegmentationNode = self.loadSegmentationNodeRobust(
+                    segmentationPath=outputPath,
+                    referenceVolumeNode=referenceVolumeNode,
+                )
+                loadedNodes.append(outputSegmentationNode)
+
+                metricValues = self.computeMetricsForSegmentationPair(
+                    originalSegmentationNode=originalSegmentationNode,
+                    outputSegmentationNode=outputSegmentationNode,
+                    referenceVolumeNode=referenceVolumeNode,
+                    selectedMetrics=selectedMetrics,
+                )
+
+                metricsRow = {
+                    "sampleId": sampleId,
+                    "runId": runId,
+                    "method": designRow.get("method", ""),
+                    "name": designRow.get("name", ""),
+                    "parameterName": parameterName,
+                    "parameterValue": parameterValue,
+                    "outputPath": outputPath,
+                    "status": "success",
+                    "error": "",
+                }
+
+                metricsRow.update(metricValues)
+                metricsRows.append(metricsRow)
+
+            except Exception as exc:
+                failedRows += 1
+
+                metricsRows.append({
+                    "sampleId": sampleId,
+                    "runId": runId,
+                    "method": "",
+                    "name": "",
+                    "parameterName": "",
+                    "parameterValue": "",
+                    "outputPath": outputPath,
+                    "status": "failed",
+                    "error": str(exc),
+                })
+
+                logging.error(
+                    f"Metrics failed for sample {sampleId}, run {runId}: {str(exc)}"
+                )
+
+            finally:
+                for node in loadedNodes:
+                    if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                        slicer.mrmlScene.RemoveNode(node)
+
+                if progressCallback:
+                    progressValue = int(rowIndex / totalRows * 100) if totalRows > 0 else 100
+                    progressCallback(
+                        progressValue,
+                        f"Metrics row {rowIndex}/{totalRows}"
+                    )
+
+                slicer.app.processEvents()
+
+        metricsCsvPath = os.path.join(experimentOutputFolder, "experiment_metrics.csv")
+        self.saveMetricsCsv(metricsRows, metricsCsvPath)
+
+        plotsFolder = os.path.join(experimentOutputFolder, "plots")
+
+        if generatePlots:
+            self.generateMetricPlots(
+                metricsRows=metricsRows,
+                plotsFolder=plotsFolder,
+            )
+        else:
+            plotsFolder = ""
+
+        if progressCallback:
+            progressCallback(
+                100,
+                f"Metrics analysis completed. Failed rows: {failedRows}"
+            )
+
+        return {
+            "processed_rows": len(metricsRows),
+            "failed_rows": failedRows,
+            "metrics_csv": metricsCsvPath,
+            "plots_folder": plotsFolder,
+        }
+    
+    def saveMetricsCsv(self, metricsRows, metricsCsvPath):
+        if not metricsRows:
+            raise ValueError("No metric rows to save.")
+
+        fieldNames = [
+            "sampleId",
+            "runId",
+            "method",
+            "name",
+            "parameterName",
+            "parameterValue",
+            "originalSegmentCount",
+            "outputSegmentCount",
+            "segmentCountDifference",
+            "segmentCountPreserved",
+            "originalVolumeMm3",
+            "outputVolumeMm3",
+            "volumeChangePercent",
+            "diceAgainstOriginal",
+            "originalSurfaceAreaMm2",
+            "outputSurfaceAreaMm2",
+            "surfaceAreaChangePercent",
+            "outputPath",
+            "status",
+            "error",
+        ]
+
+        with open(metricsCsvPath, "w", newline="") as csvFile:
+            writer = csv.DictWriter(csvFile, fieldnames=fieldNames, extrasaction="ignore")
+            writer.writeheader()
+
+            for row in metricsRows:
+                writer.writerow(row)
+
+        return metricsCsvPath
+    
+    def generateMetricPlots(self, metricsRows, plotsFolder):
+        """
+        Generate simple metric plots from experiment_metrics.csv rows.
+
+        If matplotlib is unavailable, plotting is skipped but metrics CSV remains valid.
+        """
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            logging.warning(f"Matplotlib unavailable. Skipping plots: {str(exc)}")
+            return
+
+        os.makedirs(plotsFolder, exist_ok=True)
+
+        successfulRows = [
+            row for row in metricsRows
+            if row.get("status", "") == "success"
+        ]
+
+        plotDefinitions = [
+            ("volumeChangePercent", "Volume change [%]", "volume_change_percent.png"),
+            ("diceAgainstOriginal", "Dice against original", "dice_against_original.png"),
+            ("surfaceAreaChangePercent", "Surface area change [%]", "surface_area_change_percent.png"),
+            ("segmentCountDifference", "Segment count difference", "segment_count_difference.png"),
+        ]
+
+        for metricKey, yLabel, fileName in plotDefinitions:
+            rows = []
+
+            for row in successfulRows:
+                value = row.get(metricKey, "")
+                parameterValue = row.get("parameterValue", "")
+                method = row.get("name", row.get("method", ""))
+
+                if value == "" or parameterValue == "":
+                    continue
+
+                try:
+                    rows.append(
+                        {
+                            "method": method,
+                            "parameterValue": float(parameterValue),
+                            "metricValue": float(value),
+                        }
+                    )
+                except Exception:
+                    continue
+
+            if not rows:
+                continue
+
+            methods = sorted(set(row["method"] for row in rows))
+
+            plt.figure(figsize=(8, 6))
+
+            for method in methods:
+                methodRows = [
+                    row for row in rows
+                    if row["method"] == method
+                ]
+
+                methodRows = sorted(methodRows, key=lambda r: r["parameterValue"])
+
+                x = [row["parameterValue"] for row in methodRows]
+                y = [row["metricValue"] for row in methodRows]
+
+                plt.scatter(x, y, label=method)
+
+            plt.xlabel("Parameter value")
+            plt.ylabel(yLabel)
+            plt.title(yLabel + " by smoothing parameter")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            outputPath = os.path.join(plotsFolder, fileName)
+            plt.savefig(outputPath, dpi=200)
+            plt.close()
+    def runSmoothingExperiment(
+        self,
+        inputFolder,
+        outputFolder,
+        experimentRuns,
+        scope="ALL_SEGMENTS",
+        recursive=True,
+        keepLoadedNodes=False,
+        progressCallback=None,
+    ):
+        """
+        Run a smoothing experiment over all matched volume/segmentation pairs.
+
+        Each experiment run represents one smoothing method with one parameter set.
+        Each run is applied independently to the original segmentation.
+        """
+
+        if not os.path.isdir(inputFolder):
+            raise ValueError(f"Input folder does not exist: {inputFolder}")
+
+        if not experimentRuns:
+            raise ValueError("No experiment runs were generated.")
+
+        os.makedirs(outputFolder, exist_ok=True)
+        inputFolderAbs = os.path.abspath(inputFolder)
+        outputFolderAbs = os.path.abspath(outputFolder)
+
+        if outputFolderAbs == inputFolderAbs:
+            raise ValueError(
+                "The experiment output folder cannot be the same as the input folder. "
+                "Select a separate output folder."
+            )
+
+        if recursive and outputFolderAbs.startswith(inputFolderAbs + os.sep):
+            raise ValueError(
+                "The experiment output folder cannot be inside the input folder when recursive search is enabled. "
+                "Select a separate output folder or disable recursive search."
+            )
+
+        designCsvPath = self.saveExperimentDesignCsv(
+            experimentRuns=experimentRuns,
+            outputFolder=outputFolder,
+        )
+
+        pairs = self.findVolumeSegmentationPairs(
+            folderPath=inputFolder,
+            recursive=recursive,
+        )
+
+        if not pairs:
+            raise ValueError(
+                "No matching volume/segmentation pairs were found. "
+                "Expected names such as Volume_001.nrrd and Segmentation_001.seg.nrrd."
+            )
+
+        summaryRows = []
+
+        totalOperations = len(pairs) * len(experimentRuns)
+        completedOperations = 0
+
+        if progressCallback:
+            progressCallback(
+                0,
+                f"Experiment started. {len(pairs)} sample(s), {len(experimentRuns)} run(s)."
+            )
+
+        for pairIndex, pair in enumerate(pairs, start=1):
+            sampleId = pair["sampleId"]
+            volumePath = pair["volumePath"]
+            segmentationPath = pair["segmentationPath"]
+
+            loadedNodes = []
+            outputNodes = []
+
+            try:
+                referenceVolumeNode = slicer.util.loadVolume(volumePath)
+
+                if referenceVolumeNode is None:
+                    raise RuntimeError(f"Failed to load volume: {volumePath}")
+
+                loadedNodes.append(referenceVolumeNode)
+
+                segmentationNode = self.loadSegmentationNodeRobust(
+                    segmentationPath=segmentationPath,
+                    referenceVolumeNode=referenceVolumeNode,
+                )
+
+                if segmentationNode is None:
+                    raise RuntimeError(f"Failed to load segmentation: {segmentationPath}")
+
+                segmentationNode.CreateDefaultDisplayNodes()
+                loadedNodes.append(segmentationNode)
+
+                if segmentationNode.GetSegmentation().GetNumberOfSegments() == 0:
+                    raise RuntimeError(
+                        f"Segmentation has no segments: {segmentationPath}"
+                    )
+
+                for run in experimentRuns:
+                    runStartTime = time.time()
+
+                    runId = run["runId"]
+                    method = run["method"]
+                    methodName = run.get("name", method)
+                    safeMethodName = self.safeNodeName(methodName)
+
+                    runOutputFolder = os.path.join(outputFolder, runId)
+                    os.makedirs(runOutputFolder, exist_ok=True)
+
+                    outputName = (
+                        f"Segmentation_{sampleId}_{runId}_{safeMethodName}"
+                    )
+
+                    outputNode = slicer.mrmlScene.AddNewNodeByClass(
+                        "vtkMRMLSegmentationNode",
+                        outputName,
+                    )
+
+                    outputNodes.append(outputNode)
+
+                    try:
+                        self.copySegmentationContent(
+                            inputSegmentationNode=segmentationNode,
+                            outputSegmentationNode=outputNode,
+                            outputName=outputName,
+                        )
+
+                        self.smoothSegmentation(
+                            segmentationNode=outputNode,
+                            referenceVolumeNode=referenceVolumeNode,
+                            method=method,
+                            scope=scope,
+                            kernelSizeMm=run.get("kernelSizeMm", 3.0),
+                            gaussianStandardDeviationMm=run.get(
+                                "gaussianStandardDeviationMm", 1.0
+                            ),
+                            jointTaubinSmoothingFactor=run.get(
+                                "jointTaubinSmoothingFactor", 0.5
+                            ),
+                        )
+
+                        outputFileName = f"{outputName}.seg.nrrd"
+                        outputPath = os.path.join(runOutputFolder, outputFileName)
+
+                        success = slicer.util.saveNode(outputNode, outputPath)
+
+                        if not success:
+                            raise RuntimeError(f"Failed to save output: {outputPath}")
+
+                        status = "success"
+                        error = ""
+
+                    except Exception as exc:
+                        outputPath = ""
+                        status = "failed"
+                        error = str(exc)
+                        logging.error(
+                            f"Experiment failed for sample {sampleId}, run {runId}: {error}"
+                        )
+
+                    runStopTime = time.time()
+
+                    summaryRows.append({
+                        "runId": runId,
+                        "sampleId": sampleId,
+                        "method": method,
+                        "name": methodName,
+                        "kernelSizeMm": run.get("kernelSizeMm", ""),
+                        "gaussianStandardDeviationMm": run.get(
+                            "gaussianStandardDeviationMm", ""
+                        ),
+                        "jointTaubinSmoothingFactor": run.get(
+                            "jointTaubinSmoothingFactor", ""
+                        ),
+                        "outputPath": outputPath,
+                        "status": status,
+                        "error": error,
+                        "processingTimeSec": f"{runStopTime - runStartTime:.4f}",
+                    })
+
+                    completedOperations += 1
+
+                    if progressCallback:
+                        progressValue = int(
+                            completedOperations / totalOperations * 100
+                        )
+                        progressCallback(
+                            progressValue,
+                            (
+                                f"Sample {sampleId}, {runId}: {methodName}. "
+                                f"{completedOperations}/{totalOperations}"
+                            )
+                        )
+
+            except Exception as exc:
+                logging.error(f"Failed to process sample {sampleId}: {str(exc)}")
+
+                for run in experimentRuns:
+                    summaryRows.append({
+                        "runId": run["runId"],
+                        "sampleId": sampleId,
+                        "method": run["method"],
+                        "name": run.get("name", run["method"]),
+                        "kernelSizeMm": run.get("kernelSizeMm", ""),
+                        "gaussianStandardDeviationMm": run.get(
+                            "gaussianStandardDeviationMm", ""
+                        ),
+                        "jointTaubinSmoothingFactor": run.get(
+                            "jointTaubinSmoothingFactor", ""
+                        ),
+                        "outputPath": "",
+                        "status": "failed",
+                        "error": str(exc),
+                        "processingTimeSec": "0.0000",
+                    })
+
+                    completedOperations += 1
+
+            finally:
+                if not keepLoadedNodes:
+                    for node in outputNodes:
+                        if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                            slicer.mrmlScene.RemoveNode(node)
+
+                    for node in loadedNodes:
+                        if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                            slicer.mrmlScene.RemoveNode(node)
+
+                slicer.app.processEvents()
+
+        summaryCsvPath = os.path.join(outputFolder, "experiment_summary.csv")
+
+        fieldNames = [
+            "runId",
+            "sampleId",
+            "method",
+            "name",
+            "kernelSizeMm",
+            "gaussianStandardDeviationMm",
+            "jointTaubinSmoothingFactor",
+            "outputPath",
+            "status",
+            "error",
+            "processingTimeSec",
+        ]
+
+        with open(summaryCsvPath, "w", newline="") as csvFile:
+            writer = csv.DictWriter(csvFile, fieldnames=fieldNames)
+            writer.writeheader()
+            writer.writerows(summaryRows)
+
+        successfulRuns = len([
+            row for row in summaryRows
+            if row["status"] == "success"
+        ])
+
+        failedRuns = len([
+            row for row in summaryRows
+            if row["status"] == "failed"
+        ])
+
+        if progressCallback:
+            progressCallback(
+                100,
+                (
+                    f"Experiment completed. Success: {successfulRuns}, "
+                    f"failed: {failedRuns}."
+                )
+            )
+
+        return {
+            "found_pairs": len(pairs),
+            "experiment_runs": len(experimentRuns),
+            "successful_outputs": successfulRuns,
+            "failed_outputs": failedRuns,
+            "design_csv": designCsvPath,
+            "summary_csv": summaryCsvPath,
+        }
 
 class SmoothingTest(ScriptedLoadableModuleTest):
     """
@@ -1770,7 +3189,10 @@ class SmoothingTest(ScriptedLoadableModuleTest):
         # ------------------------------------------------------------
         # 3) Match volume and segmentation files by normalized basename
         # ------------------------------------------------------------
-        pairs = self._findVolumeSegmentationPairs(volumeFiles, segmentationFiles)
+        pairs = logic.findVolumeSegmentationPairs(
+            folderPath=dataDir,
+            recursive=True,
+        )
 
         self.assertGreater(
             len(pairs),
@@ -1782,7 +3204,9 @@ class SmoothingTest(ScriptedLoadableModuleTest):
             )
         )
 
-        volumePath, segmentationPath = random.choice(pairs)
+        selectedPair = random.choice(pairs)
+        volumePath = selectedPair["volumePath"]
+        segmentationPath = selectedPair["segmentationPath"]
 
         self.delayDisplay(f"Selected volume: {os.path.basename(volumePath)}")
         self.delayDisplay(f"Selected segmentation: {os.path.basename(segmentationPath)}")

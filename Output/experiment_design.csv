@@ -1,0 +1,9 @@
+runId,method,name,kernelSizeMm,gaussianStandardDeviationMm,jointTaubinSmoothingFactor
+run_0001,GAUSSIAN,Gaussian,,0.5,
+run_0002,GAUSSIAN,Gaussian,,1.0,
+run_0003,GAUSSIAN,Gaussian,,1.5,
+run_0004,GAUSSIAN,Gaussian,,2.0,
+run_0005,JOINT_TAUBIN,Joint Taubin,,,0.2
+run_0006,JOINT_TAUBIN,Joint Taubin,,,0.4
+run_0007,JOINT_TAUBIN,Joint Taubin,,,0.6
+run_0008,JOINT_TAUBIN,Joint Taubin,,,0.8

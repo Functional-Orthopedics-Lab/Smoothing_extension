@@ -1,0 +1,25 @@
+runId,sampleId,method,name,kernelSizeMm,gaussianStandardDeviationMm,jointTaubinSmoothingFactor,outputPath,status,error,processingTimeSec
+run_0001,1696197,GAUSSIAN,Gaussian,,0.5,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0001/Segmentation_1696197_run_0001_Gaussian.seg.nrrd,success,,13.4852
+run_0002,1696197,GAUSSIAN,Gaussian,,1.0,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0002/Segmentation_1696197_run_0002_Gaussian.seg.nrrd,success,,15.5243
+run_0003,1696197,GAUSSIAN,Gaussian,,1.5,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0003/Segmentation_1696197_run_0003_Gaussian.seg.nrrd,success,,19.0457
+run_0004,1696197,GAUSSIAN,Gaussian,,2.0,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0004/Segmentation_1696197_run_0004_Gaussian.seg.nrrd,success,,21.7653
+run_0005,1696197,JOINT_TAUBIN,Joint Taubin,,,0.2,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0005/Segmentation_1696197_run_0005_Joint_Taubin.seg.nrrd,success,,40.2411
+run_0006,1696197,JOINT_TAUBIN,Joint Taubin,,,0.4,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0006/Segmentation_1696197_run_0006_Joint_Taubin.seg.nrrd,success,,42.3905
+run_0007,1696197,JOINT_TAUBIN,Joint Taubin,,,0.6,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0007/Segmentation_1696197_run_0007_Joint_Taubin.seg.nrrd,success,,42.7571
+run_0008,1696197,JOINT_TAUBIN,Joint Taubin,,,0.8,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0008/Segmentation_1696197_run_0008_Joint_Taubin.seg.nrrd,success,,41.1292
+run_0001,1680681,GAUSSIAN,Gaussian,,0.5,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0001/Segmentation_1680681_run_0001_Gaussian.seg.nrrd,success,,16.7240
+run_0002,1680681,GAUSSIAN,Gaussian,,1.0,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0002/Segmentation_1680681_run_0002_Gaussian.seg.nrrd,success,,19.6078
+run_0003,1680681,GAUSSIAN,Gaussian,,1.5,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0003/Segmentation_1680681_run_0003_Gaussian.seg.nrrd,success,,24.1964
+run_0004,1680681,GAUSSIAN,Gaussian,,2.0,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0004/Segmentation_1680681_run_0004_Gaussian.seg.nrrd,success,,28.2000
+run_0005,1680681,JOINT_TAUBIN,Joint Taubin,,,0.2,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0005/Segmentation_1680681_run_0005_Joint_Taubin.seg.nrrd,success,,43.9738
+run_0006,1680681,JOINT_TAUBIN,Joint Taubin,,,0.4,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0006/Segmentation_1680681_run_0006_Joint_Taubin.seg.nrrd,success,,45.5594
+run_0007,1680681,JOINT_TAUBIN,Joint Taubin,,,0.6,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0007/Segmentation_1680681_run_0007_Joint_Taubin.seg.nrrd,success,,44.9921
+run_0008,1680681,JOINT_TAUBIN,Joint Taubin,,,0.8,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0008/Segmentation_1680681_run_0008_Joint_Taubin.seg.nrrd,success,,45.3829
+run_0001,1149878,GAUSSIAN,Gaussian,,0.5,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0001/Segmentation_1149878_run_0001_Gaussian.seg.nrrd,success,,14.9561
+run_0002,1149878,GAUSSIAN,Gaussian,,1.0,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0002/Segmentation_1149878_run_0002_Gaussian.seg.nrrd,success,,17.7210
+run_0003,1149878,GAUSSIAN,Gaussian,,1.5,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0003/Segmentation_1149878_run_0003_Gaussian.seg.nrrd,success,,22.4664
+run_0004,1149878,GAUSSIAN,Gaussian,,2.0,,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0004/Segmentation_1149878_run_0004_Gaussian.seg.nrrd,success,,26.7995
+run_0005,1149878,JOINT_TAUBIN,Joint Taubin,,,0.2,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0005/Segmentation_1149878_run_0005_Joint_Taubin.seg.nrrd,success,,41.6616
+run_0006,1149878,JOINT_TAUBIN,Joint Taubin,,,0.4,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0006/Segmentation_1149878_run_0006_Joint_Taubin.seg.nrrd,success,,40.9802
+run_0007,1149878,JOINT_TAUBIN,Joint Taubin,,,0.6,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0007/Segmentation_1149878_run_0007_Joint_Taubin.seg.nrrd,success,,43.3068
+run_0008,1149878,JOINT_TAUBIN,Joint Taubin,,,0.8,/home/benjamin/Escritorio/Research_projects/RUSH/Smoothing_extension/Output/run_0008/Segmentation_1149878_run_0008_Joint_Taubin.seg.nrrd,success,,43.0322
