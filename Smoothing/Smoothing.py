@@ -1520,7 +1520,13 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
     def getParameterNode(self):
         return SmoothingParameterNode(super().getParameterNode())
 
-    def copySegmentationContent(self, inputSegmentationNode, outputSegmentationNode, outputName=None):
+    def copySegmentationContent(
+        self,
+        inputSegmentationNode,
+        outputSegmentationNode,
+        outputName=None,
+        createDisplayNode=False,
+    ):
         """
         Copy only segmentation content and force an independent display node.
 
@@ -1561,19 +1567,21 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
         outputSegmentationNode.SetAndObserveDisplayNodeID(outputDisplayNode.GetID())
 
         # ------------------------------------------------------------------
-        # 5) Copy transform if input segmentation has one
-        # ------------------------------------------------------------------
-        outputSegmentationNode.SetAndObserveTransformNodeID(
-            inputSegmentationNode.GetTransformNodeID()
-        )
-
-        # ------------------------------------------------------------------
         # 6) Optional: make output visible
         # ------------------------------------------------------------------
-        outputDisplayNode.SetVisibility(True)
-        outputDisplayNode.SetVisibility3D(True)
-        outputDisplayNode.SetVisibility2DFill(True)
-        outputDisplayNode.SetVisibility2DOutline(True)
+        if createDisplayNode:
+            outputDisplayNode = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLSegmentationDisplayNode",
+                outputSegmentationNode.GetName() + "_Display"
+            )
+
+            outputSegmentationNode.SetAndObserveDisplayNodeID(outputDisplayNode.GetID())
+
+            outputDisplayNode.SetVisibility(True)
+            outputDisplayNode.SetVisibility3D(True)
+            outputDisplayNode.SetVisibility2DFill(True)
+            outputDisplayNode.SetVisibility2DOutline(True)
+
     def cloneSegmentation(self, inputSegmentationNode, outputSegmentationNode) -> None:
         """Copy input segmentation content into the output segmentation node."""
 
@@ -1581,6 +1589,7 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
             inputSegmentationNode=inputSegmentationNode,
             outputSegmentationNode=outputSegmentationNode,
             outputName=inputSegmentationNode.GetName() + "_smoothed",
+            createDisplayNode=True
         )
 
     def smoothSegmentation(
@@ -1742,6 +1751,7 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
                 inputSegmentationNode=inputSegmentationNode,
                 outputSegmentationNode=outputNode,
                 outputName=outputName,
+                createDisplayNode=True
             )
 
             logging.info(
@@ -2057,7 +2067,26 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
         logging.info(f"[BATCH PAIRING] Total pairs found: {len(pairs)}")
 
         return pairs
+    
+    def shouldUpdateProgress(self, completedOperations, totalOperations, everyPercent=2):
+        """
+        Return True only when the progress percentage has advanced enough.
 
+        This avoids updating the Slicer GUI after every single operation,
+        which can slow large batch/experiment runs.
+        """
+
+        if totalOperations <= 0:
+            return True
+
+        if completedOperations == 0 or completedOperations == totalOperations:
+            return True
+
+        previousPercent = int((completedOperations - 1) / totalOperations * 100)
+        currentPercent = int(completedOperations / totalOperations * 100)
+
+        return currentPercent >= previousPercent + everyPercent
+    
     def batchSmoothSegmentations(
         self,
         inputFolder,
@@ -2217,6 +2246,7 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
                         inputSegmentationNode=segmentationNode,
                         outputSegmentationNode=outputNode,
                         outputName=outputName,
+                        createDisplayNode=keepLoadedNodes,
                     )
 
                     self.smoothSegmentation(
@@ -2233,25 +2263,35 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
                         ),
                     )
 
-                    outputNodes.append(outputNode)
-
                     outputFileName = (
                         f"Segmentation_{sampleId}_{safeMethodName}_smoothed.seg.nrrd"
                     )
 
-                    outputPath = os.path.join(outputFolder, outputFileName)
+                    outputPath = os.path.abspath(
+                        os.path.join(outputFolder, outputFileName)
+                    )
 
                     success = slicer.util.saveNode(outputNode, outputPath)
 
                     if not success:
                         raise RuntimeError(f"Failed to save output: {outputPath}")
-
+                    
                     logging.info(f"Saved: {outputPath}")
                     savedOutputs += 1
 
+                    if keepLoadedNodes:
+                        outputNodes.append(outputNode)
+                    else:
+                        slicer.mrmlScene.RemoveNode(outputNode)
+                        outputNode = None
+                        
                     completedOperations += 1
 
-                    if progressCallback:
+                    if progressCallback and self.shouldUpdateProgress(
+                        completedOperations,
+                        totalOperations,
+                        everyPercent=2,
+                    ):
                         progressValue = int((completedOperations / totalOperations) * 100)
                         progressCallback(
                             progressValue,
@@ -2940,13 +2980,12 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
                         outputName,
                     )
 
-                    outputNodes.append(outputNode)
-
                     try:
                         self.copySegmentationContent(
                             inputSegmentationNode=segmentationNode,
                             outputSegmentationNode=outputNode,
                             outputName=outputName,
+                            createDisplayNode=keepLoadedNodes,
                         )
 
                         self.smoothSegmentation(
@@ -2975,6 +3014,12 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
 
                         status = "success"
                         error = ""
+
+                        if keepLoadedNodes:
+                            outputNodes.append(outputNode)
+                        else:
+                            slicer.mrmlScene.RemoveNode(outputNode)
+                            outputNode = None
 
                     except Exception as exc:
                         outputPath = ""
@@ -3006,10 +3051,12 @@ class SmoothingLogic(ScriptedLoadableModuleLogic):
 
                     completedOperations += 1
 
-                    if progressCallback:
-                        progressValue = int(
-                            completedOperations / totalOperations * 100
-                        )
+                    if progressCallback and self.shouldUpdateProgress(
+                        completedOperations,
+                        totalOperations,
+                        everyPercent=2,
+                    ):
+                        progressValue = int(completedOperations / totalOperations * 100)
                         progressCallback(
                             progressValue,
                             (
